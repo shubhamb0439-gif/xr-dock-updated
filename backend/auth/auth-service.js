@@ -77,8 +77,8 @@ async function signUp({ name, email, password, xrId }) {
     const generatedXrId = xrId || `XR-${Date.now()}`;
 
     await sequelize.query(
-      `INSERT INTO dbo.users (name, xr, type, status, rights, timedate)
-       VALUES (:name, :xr, :type, :status, :rights, GETDATE())`,
+      `INSERT INTO dbo.users (name, xr, type, status, rights)
+       VALUES (:name, :xr, :type, :status, :rights)`,
       {
         replacements: {
           name,
