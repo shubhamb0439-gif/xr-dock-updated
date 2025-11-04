@@ -1,27 +1,17 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { createClient } = require('@supabase/supabase-js');
+const { Sequelize } = require('sequelize');
+const { sequelize } = require('../database/database-config');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret';
 const JWT_EXPIRES_IN = '7d';
-
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY;
-
-let supabase = null;
-if (supabaseUrl && supabaseKey) {
-  supabase = createClient(supabaseUrl, supabaseKey);
-  console.log('[AUTH] Using Supabase for authentication');
-} else {
-  console.log('[AUTH] No Supabase credentials - authentication will fail');
-}
 
 function generateToken(user) {
   return jwt.sign(
     {
       id: user.id,
       email: user.email,
-      xrId: user.xr_id || user.xrId
+      xrId: user.xr
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
@@ -42,62 +32,88 @@ async function signUp({ name, email, password, xrId }) {
     throw new Error('Invalid email format');
   }
 
-  if (!supabase) {
-    throw new Error('Database not available - check Supabase configuration');
-  }
-
   const hashedPassword = await bcrypt.hash(password, 10);
 
   try {
-    const { data: existingUser, error: checkError } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .maybeSingle();
+    const existingUser = await sequelize.query(
+      'SELECT id FROM dbo.users WHERE email = :email',
+      {
+        replacements: { email },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
 
-    if (checkError && checkError.code !== 'PGRST116') {
-      console.error('[AUTH] Check error:', checkError);
-      throw new Error(`Database error: ${checkError.message}`);
-    }
-
-    if (existingUser) {
+    if (existingUser && existingUser.length > 0) {
       throw new Error('User already exists');
     }
 
+    const defaultType = await sequelize.query(
+      'SELECT TOP 1 id FROM dbo.typeuser WHERE typeuser = :type',
+      {
+        replacements: { type: 'Scribe' },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
+    const typeId = defaultType && defaultType[0] ? defaultType[0].id : 2;
+
+    const defaultStatus = await sequelize.query(
+      'SELECT TOP 1 id FROM dbo.statususer WHERE status = :status',
+      {
+        replacements: { status: 'Active' },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
+    const statusId = defaultStatus && defaultStatus[0] ? defaultStatus[0].id : 1;
+
+    const defaultRights = await sequelize.query(
+      'SELECT TOP 1 id FROM dbo.rightsuser WHERE rights = :rights',
+      {
+        replacements: { rights: 'Provider' },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
+    const rightsId = defaultRights && defaultRights[0] ? defaultRights[0].id : 1;
+
     const generatedXrId = xrId || `XR-${Date.now()}`;
 
-    const { data: newUser, error: insertError } = await supabase
-      .from('users')
-      .insert({
-        name,
-        email,
-        password: hashedPassword,
-        xr_id: generatedXrId
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error('[AUTH] Insert error:', insertError);
-      if (insertError.code === '23505') {
-        if (insertError.message.includes('email')) {
-          throw new Error('User already exists');
-        }
-        if (insertError.message.includes('xr_id')) {
-          throw new Error('XR ID already in use');
-        }
+    await sequelize.query(
+      `INSERT INTO dbo.users (name, xr, type, status, rights, email, password, timedate)
+       VALUES (:name, :xr, :type, :status, :rights, :email, :password, GETDATE())`,
+      {
+        replacements: {
+          name,
+          xr: generatedXrId,
+          type: typeId,
+          status: statusId,
+          rights: rightsId,
+          email,
+          password: hashedPassword
+        },
+        type: Sequelize.QueryTypes.INSERT
       }
-      throw new Error(`Failed to create user: ${insertError.message}`);
+    );
+
+    const newUser = await sequelize.query(
+      'SELECT TOP 1 id, name, xr, email FROM dbo.users WHERE email = :email ORDER BY id DESC',
+      {
+        replacements: { email },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
+
+    if (!newUser || newUser.length === 0) {
+      throw new Error('Failed to create user');
     }
 
-    const token = generateToken(newUser);
+    const user = newUser[0];
+    const token = generateToken(user);
 
     return {
       user: {
-        id: newUser.id,
-        name: newUser.name,
-        email: newUser.email,
-        xrId: newUser.xr_id
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        xrId: user.xr
       },
       token
     };
@@ -113,24 +129,23 @@ async function signIn({ email, password }) {
     throw new Error('Email and password are required');
   }
 
-  if (!supabase) {
-    throw new Error('Database not available - check Supabase configuration');
-  }
-
   try {
-    const { data: user, error: fetchError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .maybeSingle();
+    const userData = await sequelize.query(
+      'SELECT id, name, xr, email, password FROM dbo.users WHERE email = :email',
+      {
+        replacements: { email },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
 
-    if (fetchError) {
-      console.error('[AUTH] Fetch error:', fetchError);
-      throw new Error(`Database error: ${fetchError.message}`);
+    if (!userData || userData.length === 0) {
+      throw new Error('Invalid credentials');
     }
 
-    if (!user) {
-      throw new Error('Invalid credentials');
+    const user = userData[0];
+
+    if (!user.password) {
+      throw new Error('Account not set up for password authentication');
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -145,7 +160,7 @@ async function signIn({ email, password }) {
         id: user.id,
         name: user.name,
         email: user.email,
-        xrId: user.xr_id
+        xrId: user.xr
       },
       token
     };
