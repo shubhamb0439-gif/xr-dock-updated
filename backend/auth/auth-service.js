@@ -106,12 +106,14 @@ async function signUp({ name, email, password, xrId }) {
     const userId = newUser[0].id;
 
     await sequelize.query(
-      `INSERT INTO dbo.accessuser (userid, email, password)
-       VALUES (:userid, :email, :password)`,
+      `INSERT INTO dbo.accessuser (userid, email, isd, mobile, password)
+       VALUES (:userid, :email, :isd, :mobile, :password)`,
       {
         replacements: {
           userid: userId,
           email,
+          isd: '+1',
+          mobile: '',
           password: hashedPassword
         },
         type: Sequelize.QueryTypes.INSERT
