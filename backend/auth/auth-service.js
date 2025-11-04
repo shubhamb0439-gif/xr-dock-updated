@@ -35,15 +35,15 @@ async function signUp({ name, email, password, xrId }) {
   const hashedPassword = await bcrypt.hash(password, 10);
 
   try {
-    const existingUser = await sequelize.query(
-      'SELECT id FROM dbo.users WHERE email = :email',
+    const existingAccessUser = await sequelize.query(
+      'SELECT id FROM dbo.accessuser WHERE email = :email',
       {
         replacements: { email },
         type: Sequelize.QueryTypes.SELECT
       }
     );
 
-    if (existingUser && existingUser.length > 0) {
+    if (existingAccessUser && existingAccessUser.length > 0) {
       throw new Error('User already exists');
     }
 
@@ -77,26 +77,24 @@ async function signUp({ name, email, password, xrId }) {
     const generatedXrId = xrId || `XR-${Date.now()}`;
 
     await sequelize.query(
-      `INSERT INTO dbo.users (name, xr, type, status, rights, email, password, timedate)
-       VALUES (:name, :xr, :type, :status, :rights, :email, :password, GETDATE())`,
+      `INSERT INTO dbo.users (name, xr, type, status, rights, timedate)
+       VALUES (:name, :xr, :type, :status, :rights, GETDATE())`,
       {
         replacements: {
           name,
           xr: generatedXrId,
           type: typeId,
           status: statusId,
-          rights: rightsId,
-          email,
-          password: hashedPassword
+          rights: rightsId
         },
         type: Sequelize.QueryTypes.INSERT
       }
     );
 
     const newUser = await sequelize.query(
-      'SELECT TOP 1 id, name, xr, email FROM dbo.users WHERE email = :email ORDER BY id DESC',
+      'SELECT TOP 1 id, name, xr FROM dbo.users WHERE xr = :xr ORDER BY id DESC',
       {
-        replacements: { email },
+        replacements: { xr: generatedXrId },
         type: Sequelize.QueryTypes.SELECT
       }
     );
@@ -105,15 +103,33 @@ async function signUp({ name, email, password, xrId }) {
       throw new Error('Failed to create user');
     }
 
-    const user = newUser[0];
-    const token = generateToken(user);
+    const userId = newUser[0].id;
+
+    await sequelize.query(
+      `INSERT INTO dbo.accessuser (userid, email, password)
+       VALUES (:userid, :email, :password)`,
+      {
+        replacements: {
+          userid: userId,
+          email,
+          password: hashedPassword
+        },
+        type: Sequelize.QueryTypes.INSERT
+      }
+    );
+
+    const token = generateToken({
+      id: userId,
+      email,
+      xr: newUser[0].xr
+    });
 
     return {
       user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        xrId: user.xr
+        id: userId,
+        name: newUser[0].name,
+        email,
+        xrId: newUser[0].xr
       },
       token
     };
@@ -130,36 +146,54 @@ async function signIn({ email, password }) {
   }
 
   try {
-    const userData = await sequelize.query(
-      'SELECT id, name, xr, email, password FROM dbo.users WHERE email = :email',
+    const accessUserData = await sequelize.query(
+      'SELECT id, userid, email, password FROM dbo.accessuser WHERE email = :email',
       {
         replacements: { email },
         type: Sequelize.QueryTypes.SELECT
       }
     );
 
-    if (!userData || userData.length === 0) {
+    if (!accessUserData || accessUserData.length === 0) {
       throw new Error('Invalid credentials');
     }
 
-    const user = userData[0];
+    const accessUser = accessUserData[0];
 
-    if (!user.password) {
+    if (!accessUser.password) {
       throw new Error('Account not set up for password authentication');
     }
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password, accessUser.password);
     if (!isPasswordValid) {
       throw new Error('Invalid credentials');
     }
 
-    const token = generateToken(user);
+    const userData = await sequelize.query(
+      'SELECT id, name, xr FROM dbo.users WHERE id = :userid',
+      {
+        replacements: { userid: accessUser.userid },
+        type: Sequelize.QueryTypes.SELECT
+      }
+    );
+
+    if (!userData || userData.length === 0) {
+      throw new Error('User data not found');
+    }
+
+    const user = userData[0];
+
+    const token = generateToken({
+      id: user.id,
+      email,
+      xr: user.xr
+    });
 
     return {
       user: {
         id: user.id,
         name: user.name,
-        email: user.email,
+        email,
         xrId: user.xr
       },
       token
