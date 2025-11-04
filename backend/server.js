@@ -15,6 +15,7 @@ const { Sequelize } = require('sequelize');
 
 const { sequelize, connectToDatabase, closeDatabase } = require('./database/database-config');
 
+const authRoutes = require('./auth/auth-routes');
 
 const dotenv = require('dotenv');
 const envCandidates = [
@@ -244,6 +245,8 @@ app.get(['/device', '/device/'], sendView('device.html'));
 app.get(['/dashboard', '/dashboard/'], sendView('dashboard.html'));
 app.get(['/scribe-cockpit', '/scribe-cockpit/'], sendView('scribe-cockpit.html'));
 app.get(['/operator', '/operator/'], sendView('operator.html'));
+app.get(['/login', '/login/'], sendView('login.html'));
+app.get(['/signup', '/signup/'], sendView('signup.html'));
 app.get('/', sendView('index.html'));
 
 
@@ -490,6 +493,8 @@ function addToMessageHistory(message) {
 }
 
 // -------------------- Routes --------------------
+app.use('/api/auth', authRoutes);
+
 app.get('/health', async (_req, res) => {
   dlog('[HEALTH] request');
   try {
