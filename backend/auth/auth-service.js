@@ -1,27 +1,27 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { Sequelize } = require('sequelize');
-const { sequelize } = require('../database/database-config');
+const { createClient } = require('@supabase/supabase-js');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret';
 const JWT_EXPIRES_IN = '7d';
 
-const MOCK_USERS = [];
+const supabaseUrl = process.env.VITE_SUPABASE_URL;
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY;
 
-function isDatabaseAvailable() {
-  try {
-    return sequelize && sequelize.authenticate !== undefined;
-  } catch {
-    return false;
-  }
+let supabase = null;
+if (supabaseUrl && supabaseKey) {
+  supabase = createClient(supabaseUrl, supabaseKey);
+  console.log('[AUTH] Using Supabase for authentication');
+} else {
+  console.log('[AUTH] No Supabase credentials - authentication will fail');
 }
 
 function generateToken(user) {
   return jwt.sign(
     {
       id: user.id,
-      email: user.email || user.Email,
-      xrId: user.xr || user.xrId || user.XR
+      email: user.email,
+      xrId: user.xr_id || user.xrId
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
@@ -42,139 +42,68 @@ async function signUp({ name, email, password, xrId }) {
     throw new Error('Invalid email format');
   }
 
+  if (!supabase) {
+    throw new Error('Database not available - check Supabase configuration');
+  }
+
   const hashedPassword = await bcrypt.hash(password, 10);
 
-  if (!isDatabaseAvailable()) {
-    console.log('[AUTH] Running in MOCK MODE - no database connection');
+  try {
+    const { data: existingUser, error: checkError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
 
-    const existingUser = MOCK_USERS.find(u => u.email === email);
+    if (checkError && checkError.code !== 'PGRST116') {
+      console.error('[AUTH] Check error:', checkError);
+      throw new Error(`Database error: ${checkError.message}`);
+    }
+
     if (existingUser) {
       throw new Error('User already exists');
     }
 
-    const mockUser = {
-      id: MOCK_USERS.length + 1,
-      name,
-      email,
-      password: hashedPassword,
-      xrId: xrId || `XR-MOCK-${Date.now()}`,
-      createdAt: new Date()
-    };
+    const generatedXrId = xrId || `XR-${Date.now()}`;
 
-    MOCK_USERS.push(mockUser);
-
-    const token = generateToken(mockUser);
-    return {
-      user: {
-        id: mockUser.id,
-        name: mockUser.name,
-        email: mockUser.email,
-        xrId: mockUser.xrId
-      },
-      token
-    };
-  }
-
-  try {
-    const existingAccessUser = await sequelize.query(
-      'SELECT userid FROM dbo.accessuser WHERE email = :email',
-      {
-        replacements: { email },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
-
-    if (existingAccessUser && existingAccessUser.length > 0) {
-      throw new Error('User already exists');
-    }
-
-    const statusActive = await sequelize.query(
-      'SELECT id FROM dbo.statususer WHERE status = :status',
-      {
-        replacements: { status: 'Active' },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
-    const statusId = statusActive && statusActive[0] ? statusActive[0].id : 1;
-
-    const typeScribe = await sequelize.query(
-      'SELECT id FROM dbo.typeuser WHERE typeuser = :type',
-      {
-        replacements: { type: 'Scribe' },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
-    const typeId = typeScribe && typeScribe[0] ? typeScribe[0].id : 2;
-
-    const rightsDefault = await sequelize.query(
-      'SELECT id FROM dbo.rightsuser WHERE rights = :rights',
-      {
-        replacements: { rights: 'Provider' },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
-    const rightsId = rightsDefault && rightsDefault[0] ? rightsDefault[0].id : 1;
-
-    await sequelize.query(
-      `INSERT INTO dbo.users (name, xr, type, status, rights, timedate)
-       VALUES (:name, :xr, :type, :status, :rights, GETDATE())`,
-      {
-        replacements: {
-          name,
-          xr: xrId || `XR-${Date.now()}`,
-          type: typeId,
-          status: statusId,
-          rights: rightsId
-        },
-        type: Sequelize.QueryTypes.INSERT
-      }
-    );
-
-    const newUser = await sequelize.query(
-      'SELECT TOP 1 id, name, xr FROM dbo.users WHERE name = :name ORDER BY id DESC',
-      {
-        replacements: { name },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
-
-    if (!newUser || newUser.length === 0) {
-      throw new Error('Failed to create user');
-    }
-
-    const userId = newUser[0].id;
-
-    await sequelize.query(
-      `INSERT INTO dbo.accessuser (userid, email, password)
-       VALUES (:userid, :email, :password)`,
-      {
-        replacements: {
-          userid: userId,
-          email,
-          password: hashedPassword
-        },
-        type: Sequelize.QueryTypes.INSERT
-      }
-    );
-
-    const token = generateToken({
-      id: userId,
-      email,
-      xrId: newUser[0].xr
-    });
-
-    return {
-      user: {
-        id: userId,
-        name: newUser[0].name,
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert({
+        name,
         email,
-        xrId: newUser[0].xr
+        password: hashedPassword,
+        xr_id: generatedXrId
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('[AUTH] Insert error:', insertError);
+      if (insertError.code === '23505') {
+        if (insertError.message.includes('email')) {
+          throw new Error('User already exists');
+        }
+        if (insertError.message.includes('xr_id')) {
+          throw new Error('XR ID already in use');
+        }
+      }
+      throw new Error(`Failed to create user: ${insertError.message}`);
+    }
+
+    const token = generateToken(newUser);
+
+    return {
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        xrId: newUser.xr_id
       },
       token
     };
 
   } catch (error) {
-    console.error('[AUTH] Database signup error:', error.message);
+    console.error('[AUTH] Signup error:', error.message);
     throw error;
   }
 }
@@ -184,83 +113,45 @@ async function signIn({ email, password }) {
     throw new Error('Email and password are required');
   }
 
-  if (!isDatabaseAvailable()) {
-    console.log('[AUTH] Running in MOCK MODE - no database connection');
-
-    const mockUser = MOCK_USERS.find(u => u.email === email);
-    if (!mockUser) {
-      throw new Error('Invalid credentials');
-    }
-
-    const isPasswordValid = await bcrypt.compare(password, mockUser.password);
-    if (!isPasswordValid) {
-      throw new Error('Invalid credentials');
-    }
-
-    const token = generateToken(mockUser);
-    return {
-      user: {
-        id: mockUser.id,
-        name: mockUser.name,
-        email: mockUser.email,
-        xrId: mockUser.xrId
-      },
-      token
-    };
+  if (!supabase) {
+    throw new Error('Database not available - check Supabase configuration');
   }
 
   try {
-    const accessUserData = await sequelize.query(
-      'SELECT id, userid, email, password FROM dbo.accessuser WHERE email = :email',
-      {
-        replacements: { email },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
+    const { data: user, error: fetchError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
 
-    if (!accessUserData || accessUserData.length === 0) {
+    if (fetchError) {
+      console.error('[AUTH] Fetch error:', fetchError);
+      throw new Error(`Database error: ${fetchError.message}`);
+    }
+
+    if (!user) {
       throw new Error('Invalid credentials');
     }
 
-    const accessUser = accessUserData[0];
-
-    const isPasswordValid = await bcrypt.compare(password, accessUser.password);
+    const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       throw new Error('Invalid credentials');
     }
 
-    const userData = await sequelize.query(
-      'SELECT id, name, xr FROM dbo.users WHERE id = :userid',
-      {
-        replacements: { userid: accessUser.userid },
-        type: Sequelize.QueryTypes.SELECT
-      }
-    );
-
-    if (!userData || userData.length === 0) {
-      throw new Error('User data not found');
-    }
-
-    const user = userData[0];
-
-    const token = generateToken({
-      id: user.id,
-      email,
-      xrId: user.xr
-    });
+    const token = generateToken(user);
 
     return {
       user: {
         id: user.id,
         name: user.name,
-        email,
-        xrId: user.xr
+        email: user.email,
+        xrId: user.xr_id
       },
       token
     };
 
   } catch (error) {
-    console.error('[AUTH] Database signin error:', error.message);
+    console.error('[AUTH] Signin error:', error.message);
     throw error;
   }
 }
