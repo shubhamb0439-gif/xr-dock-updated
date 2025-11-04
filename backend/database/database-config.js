@@ -51,6 +51,26 @@ async function connectToDatabase() {
   try {
     await sequelize.authenticate();
     console.log('✅ Connected to Azure SQL Database');
+
+    // Run migration to fix password column size
+    try {
+      await sequelize.query(`
+        IF EXISTS (
+          SELECT 1
+          FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_NAME = 'accessuser'
+            AND COLUMN_NAME = 'password'
+            AND CHARACTER_MAXIMUM_LENGTH < 255
+        )
+        BEGIN
+          ALTER TABLE dbo.accessuser ALTER COLUMN password VARCHAR(255) NULL;
+          PRINT 'Password column updated to VARCHAR(255)';
+        END
+      `);
+      console.log('✅ Password column migration checked/applied');
+    } catch (migrationErr) {
+      console.error('⚠️ Password migration warning:', migrationErr.message);
+    }
  
     // If you have Sequelize models, define/import them before sync.
     await sequelize.sync({ alter: false });
