@@ -655,6 +655,27 @@ function attachEditTrackingToTextarea(box, aiText) {
 
   box.dataset.aiText = aiText || '';
 
+  // Add Enter key handler for immediate verification
+  if (section === 'Medication') {
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        // Allow Enter to create new line, but trigger verification
+        if (medicationDebounceTimer) clearTimeout(medicationDebounceTimer);
+        setTimeout(() => {
+          console.log('[MED_CHECK] Enter key pressed - triggering immediate verification');
+          checkMedicationsFromTextarea(box);
+        }, 100);
+      }
+    });
+
+    // Add blur handler for verification when focus leaves
+    box.addEventListener('blur', () => {
+      if (medicationDebounceTimer) clearTimeout(medicationDebounceTimer);
+      console.log('[MED_CHECK] Blur event - triggering immediate verification');
+      checkMedicationsFromTextarea(box);
+    });
+  }
+
   let rafId = null;
   box.addEventListener('input', () => {
     autoExpandTextarea(box);
@@ -680,28 +701,33 @@ function attachEditTrackingToTextarea(box, aiText) {
         updateTotalsAndEhrState();
         persistSoapFromUI();
 
-        // Medication: validate ONLY when full drug names are entered
+        // Medication: validate ONLY when complete drug names are entered
         if (section === 'Medication') {
-          // Show pending only for complete drug names
+          // Check if we have any complete drug names
           const lines = (box.value || '').split('\n').map(l => l.trim()).filter(Boolean);
-          const hasFullNames = lines.some(line => isFullDrugName(line));
+          const hasCompleteNames = lines.some(line => {
+            const extracted = extractDrugName(line);
+            return isCompleteName(extracted);
+          });
 
-          if (hasFullNames) {
-            // Clear only the entries that are being re-validated
+          if (hasCompleteNames) {
+            // Clear entries being re-validated
             lines.forEach(line => {
-              if (isFullDrugName(line)) {
-                const key = normalizeDrugKey(line);
+              const extracted = extractDrugName(line);
+              if (isCompleteName(extracted)) {
+                const key = normalize(extracted);
                 medAvailability.delete(key);
               }
             });
-            renderMedicationInline();        // show ⏳ for full names only
+            renderMedicationInline();
 
+            // Debounce: wait 500ms after typing stops
             if (medicationDebounceTimer) clearTimeout(medicationDebounceTimer);
             medicationDebounceTimer = setTimeout(() => {
               checkMedicationsFromTextarea(box);
             }, 500);
           } else {
-            // No full names yet, just render without marks
+            // No complete names yet, just render without marks
             renderMedicationInline();
           }
         }
@@ -804,35 +830,125 @@ const medAvailability = new Map(); // Map<normalizedName, boolean>
 // Validation state
 let medicationValidationPending = false;
 let medicationDebounceTimer = null;
+let medicationAbortController = null;
 
-// Normalize a drug string so signals and textarea lines match reliably
-function normalizeDrugKey(str) {
-  if (!str) return '';
-  let s = String(str).trim();
+// ==========================
+// EXACT-MATCH UTILITIES
+// ==========================
 
-  // Remove text like "for headache", "for joint pain"
+/**
+ * Extract drug name from raw input, removing dosage, strength, units, etc.
+ * Examples:
+ *   "paracetamol 650 mg" → "paracetamol"
+ *   "Dopamine 5%" → "Dopamine"
+ *   "Azor (for headache)" → "Azor"
+ */
+function extractDrugName(raw) {
+  if (!raw) return '';
+  let s = String(raw).trim();
+
+  // Remove parenthetical notes: (for headache), [5ml], {prn}
+  s = s.replace(/\s*[\(\[\{].*?[\)\]\}]/g, '');
+
+  // Remove "for" phrases: "for headache", "for pain"
   s = s.replace(/\s+for\s+.+$/i, '');
 
-  // Drop dosage/notes in parentheses/brackets and after hyphens/commas/colon
-  s = s.replace(/\s*[\(\[\{].*?[\)\]\}]\s*$/g, '');
-  s = s.split(/\s*[-,:@|]\s*/)[0];
+  // Remove dosage patterns: 650mg, 5%, 10ml, 2.5g, etc.
+  s = s.replace(/\s*\d+(\.\d+)?\s*(mg|g|ml|mcg|%|iu|units?)\b/gi, '');
 
-  // Collapse spaces, strip punctuation edges
-  s = s.replace(/\s+/g, ' ').replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '');
+  // Split on common separators and take first token (drug name)
+  // Separators: - , : @ | /
+  s = s.split(/\s*[-,:@|/]\s*/)[0];
 
-  return s.toLowerCase();
+  // Remove any remaining numbers at the end
+  s = s.replace(/\s*\d+(\.\d+)?\s*$/, '');
+
+  return s.trim();
 }
 
-// Check if a drug name is complete (not partial)
-function isFullDrugName(str) {
+/**
+ * Normalize a drug name for exact comparison:
+ * - Lowercase
+ * - Trim whitespace
+ * - Collapse multiple spaces to single space
+ * - Remove leading/trailing punctuation
+ * - Remove dots, commas, semicolons, colons from edges
+ */
+function normalize(str) {
+  if (!str) return '';
+  let s = String(str).trim().toLowerCase();
+
+  // Collapse multiple spaces/tabs/newlines to single space
+  s = s.replace(/\s+/g, ' ');
+
+  // Remove leading/trailing punctuation: . , ; : ! ?
+  s = s.replace(/^[.,;:!?]+|[.,;:!?]+$/g, '');
+
+  // Trim again after punctuation removal
+  s = s.trim();
+
+  return s;
+}
+
+/**
+ * Check if a string qualifies as a complete drug name:
+ * - Minimum 3 characters
+ * - Contains at least one letter
+ * - Only letters, spaces, hyphens, apostrophes (no numbers, symbols)
+ * - No trailing ellipsis or incomplete indicators
+ */
+function isCompleteName(str) {
   if (!str) return false;
   const trimmed = str.trim();
-  // Minimum 3 characters and contains no trailing ellipsis or incomplete indicators
+
+  // Minimum length
   if (trimmed.length < 3) return false;
-  if (trimmed.endsWith('...')) return false;
+
   // Must contain at least one letter
   if (!/[a-z]/i.test(trimmed)) return false;
+
+  // No incomplete indicators
+  if (trimmed.endsWith('...') || trimmed.endsWith('..')) return false;
+
+  // Only valid drug name characters: letters, spaces, hyphens, apostrophes
+  // Reject if contains numbers or other symbols
+  if (!/^[a-z\s\-']+$/i.test(trimmed)) return false;
+
   return true;
+}
+
+/**
+ * Check if input exactly matches any canonical name from API response
+ * Returns: true if exact match found, false otherwise
+ */
+function hasExactMatch(inputName, apiResults) {
+  const normalizedInput = normalize(inputName);
+
+  if (!normalizedInput) return false;
+
+  for (const result of apiResults) {
+    const canonicalName = result.name || result.canonicalName || result.drugName || result.drug || '';
+    const normalizedCanonical = normalize(canonicalName);
+
+    // EXACT EQUALITY ONLY
+    if (normalizedInput === normalizedCanonical) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Legacy function kept for backward compatibility
+function normalizeDrugKey(str) {
+  const extracted = extractDrugName(str);
+  return normalize(extracted);
+}
+
+// Legacy function kept for backward compatibility
+function isFullDrugName(str) {
+  const extracted = extractDrugName(str);
+  return isCompleteName(extracted);
 }
 
 function normalizedMedicationBlock(textarea) {
@@ -843,27 +959,49 @@ function normalizedMedicationBlock(textarea) {
   return lines.join('\n');
 }
 
-// Call API only if textarea content changed vs last validated text AND contains full drug names
+// ==========================
+// MEDICATION VERIFICATION WITH EXACT MATCHING
+// ==========================
+
+/**
+ * Call API only for complete drug names with exact-match verification
+ * Implements: debounce, abort previous requests, exact-match only marking
+ */
 async function checkMedicationsFromTextarea(textarea) {
   if (!textarea) return;
 
+  // Cancel any in-flight request
+  if (medicationAbortController) {
+    medicationAbortController.abort();
+    medicationAbortController = null;
+  }
+
   const rawLines = (textarea.value || '').split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Filter to only full drug names
-  const fullDrugNames = rawLines.filter(line => isFullDrugName(line));
+  // Extract and filter to only complete drug names
+  const completeMedications = [];
+  for (const line of rawLines) {
+    const extracted = extractDrugName(line);
+    if (isCompleteName(extracted)) {
+      completeMedications.push({ raw: line, extracted });
+    }
+  }
 
-  if (fullDrugNames.length === 0) {
+  if (completeMedications.length === 0) {
+    console.log('[MED_CHECK] No complete drug names found - clearing marks');
     medAvailability.clear();
     renderMedicationInline();
     updateAddToEhrButtonState();
     return;
   }
 
-  const currentNormalized = fullDrugNames.map(name => normalizeDrugKey(name)).join('\n');
+  // Check if content changed since last validation
+  const currentNormalized = completeMedications.map(m => normalize(m.extracted)).join('\n');
   const { byName: persistedByName, lastText } = loadMedStatus();
 
-  // If unchanged since last validation, just restore and render; no API call.
+  // If unchanged since last validation, restore cached results
   if (currentNormalized === lastText) {
+    console.log('[MED_CHECK] Content unchanged - restoring cached results');
     medAvailability.clear();
     Object.entries(persistedByName).forEach(([k, v]) => medAvailability.set(k, !!v));
     medicationValidationPending = false;
@@ -872,14 +1010,21 @@ async function checkMedicationsFromTextarea(textarea) {
     return;
   }
 
+  // Prepare API request
   medicationValidationPending = true;
   showPendingIndicators();
+
+  // Create abort controller for this request
+  medicationAbortController = new AbortController();
+
+  console.log('[MED_CHECK] Verifying', completeMedications.length, 'complete drug names:', completeMedications.map(m => m.extracted));
 
   try {
     const response = await fetch(`${SERVER_URL}/api/medications/availability`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names: fullDrugNames })
+      body: JSON.stringify({ names: completeMedications.map(m => m.extracted) }),
+      signal: medicationAbortController.signal
     });
 
     if (!response.ok) {
@@ -891,18 +1036,53 @@ async function checkMedicationsFromTextarea(textarea) {
     const data = await response.json();
     const results = data.results || [];
 
+    console.log('[MED_CHECK] API returned', results.length, 'results');
+
     medAvailability.clear();
     const newByName = {};
-    results.forEach(item => {
-      const rawName = (item.name ?? item.query ?? item.drug ?? item.drugName ?? '').toString();
-      const key = normalizeDrugKey(rawName);
-      if (!key) return;
-      const available =
-        typeof item.available === 'boolean'
-          ? item.available
-          : (item.status === 'exists' || item.status === 'available' || item.status === true);
-      medAvailability.set(key, !!available);
-      newByName[key] = !!available;
+
+    // For each drug we sent, check for EXACT match in API results
+    completeMedications.forEach(({ extracted }) => {
+      const normalizedInput = normalize(extracted);
+
+      // Find the corresponding API result by exact match
+      let foundExactMatch = false;
+      let isAvailable = false;
+
+      for (const item of results) {
+        // Get the query/input name from the API response
+        const queryName = item.query || item.input || item.name || '';
+        const normalizedQuery = normalize(extractDrugName(queryName));
+
+        // Check if this result corresponds to our input
+        if (normalizedInput === normalizedQuery) {
+          // Get canonical/database name from API
+          const canonicalName = item.canonicalName || item.drugName || item.name || '';
+          const normalizedCanonical = normalize(canonicalName);
+
+          // EXACT MATCH CHECK: input must exactly equal canonical name
+          if (normalizedInput === normalizedCanonical) {
+            foundExactMatch = true;
+            // Check availability status
+            isAvailable = typeof item.available === 'boolean'
+              ? item.available
+              : (item.status === 'exists' || item.status === 'available' || item.status === true);
+
+            console.log(`[MED_CHECK] ✓ EXACT MATCH: "${extracted}" = "${canonicalName}" → ${isAvailable ? 'AVAILABLE' : 'NOT AVAILABLE'}`);
+            break;
+          } else {
+            console.log(`[MED_CHECK] ✗ NO EXACT MATCH: "${extracted}" (input) ≠ "${canonicalName}" (canonical) - no mark shown`);
+          }
+        }
+      }
+
+      // Only store result if exact match was found
+      if (foundExactMatch) {
+        medAvailability.set(normalizedInput, isAvailable);
+        newByName[normalizedInput] = isAvailable;
+      } else {
+        console.log(`[MED_CHECK] No exact match for "${extracted}" - clearing any previous mark`);
+      }
     });
 
     // Persist statuses & the exact normalized text these apply to
@@ -911,9 +1091,18 @@ async function checkMedicationsFromTextarea(textarea) {
     medicationValidationPending = false;
     renderMedicationInline();
     updateAddToEhrButtonState();
+
+    console.log('[MED_CHECK] Verification complete. Marked', Object.keys(newByName).length, 'drugs');
+
   } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log('[MED_CHECK] Request cancelled');
+      return;
+    }
     console.error('[MED_CHECK] Error:', err);
     medicationValidationPending = false;
+  } finally {
+    medicationAbortController = null;
   }
 }
 
@@ -1070,26 +1259,29 @@ function renderMedicationInline() {
     row.appendChild(nameSpan);
 
     if (line) {
-      const key = normalizeDrugKey(line);
-      const isFull = isFullDrugName(line);
+      const extracted = extractDrugName(line);
+      const isComplete = isCompleteName(extracted);
+      const key = normalize(extracted);
 
-      // Only show status for full drug names
-      if (isFull) {
+      // Only show status for complete drug names
+      if (isComplete) {
         if (medAvailability.has(key)) {
           const ok = !!medAvailability.get(key);
           const badge = document.createElement('span');
           badge.className = `med-emoji ${ok ? 'med-available' : 'med-unavailable'}`;
           badge.textContent = ok ? '✅' : '❌';
+          badge.title = ok ? 'Available in database' : 'Not available in database';
           row.appendChild(badge);
         } else if (medicationValidationPending) {
           // If we're currently validating, show pending
           const badge = document.createElement('span');
           badge.className = 'med-emoji med-pending';
           badge.textContent = '⏳';
+          badge.title = 'Checking availability...';
           row.appendChild(badge);
         }
       }
-      // Partial names show no badge
+      // Partial/incomplete names show no badge
     }
 
     frag.appendChild(row);
