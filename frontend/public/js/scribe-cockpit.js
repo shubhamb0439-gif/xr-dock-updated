@@ -680,15 +680,30 @@ function attachEditTrackingToTextarea(box, aiText) {
         updateTotalsAndEhrState();
         persistSoapFromUI();
 
-        // Medication: show pending emojis and (debounced) validate ONLY when editing
+        // Medication: validate ONLY when full drug names are entered
         if (section === 'Medication') {
-          medAvailability.clear();         // clear in-memory so overlay shows ⏳
-          renderMedicationInline();        // show ⏳ while typing
+          // Show pending only for complete drug names
+          const lines = (box.value || '').split('\n').map(l => l.trim()).filter(Boolean);
+          const hasFullNames = lines.some(line => isFullDrugName(line));
 
-          if (medicationDebounceTimer) clearTimeout(medicationDebounceTimer);
-          medicationDebounceTimer = setTimeout(() => {
-            checkMedicationsFromTextarea(box); // will call API only if content changed vs last validated text
-          }, 600);
+          if (hasFullNames) {
+            // Clear only the entries that are being re-validated
+            lines.forEach(line => {
+              if (isFullDrugName(line)) {
+                const key = normalizeDrugKey(line);
+                medAvailability.delete(key);
+              }
+            });
+            renderMedicationInline();        // show ⏳ for full names only
+
+            if (medicationDebounceTimer) clearTimeout(medicationDebounceTimer);
+            medicationDebounceTimer = setTimeout(() => {
+              checkMedicationsFromTextarea(box);
+            }, 500);
+          } else {
+            // No full names yet, just render without marks
+            renderMedicationInline();
+          }
         }
 
       } catch (e) { console.warn('[SCRIBE] input handler error', e); }
@@ -808,6 +823,18 @@ function normalizeDrugKey(str) {
   return s.toLowerCase();
 }
 
+// Check if a drug name is complete (not partial)
+function isFullDrugName(str) {
+  if (!str) return false;
+  const trimmed = str.trim();
+  // Minimum 3 characters and contains no trailing ellipsis or incomplete indicators
+  if (trimmed.length < 3) return false;
+  if (trimmed.endsWith('...')) return false;
+  // Must contain at least one letter
+  if (!/[a-z]/i.test(trimmed)) return false;
+  return true;
+}
+
 function normalizedMedicationBlock(textarea) {
   const lines = (textarea?.value || '').split('\n')
     .map(l => l.trim())
@@ -816,11 +843,23 @@ function normalizedMedicationBlock(textarea) {
   return lines.join('\n');
 }
 
-// Call API only if textarea content changed vs last validated text
+// Call API only if textarea content changed vs last validated text AND contains full drug names
 async function checkMedicationsFromTextarea(textarea) {
   if (!textarea) return;
 
-  const currentNormalized = normalizedMedicationBlock(textarea);
+  const rawLines = (textarea.value || '').split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Filter to only full drug names
+  const fullDrugNames = rawLines.filter(line => isFullDrugName(line));
+
+  if (fullDrugNames.length === 0) {
+    medAvailability.clear();
+    renderMedicationInline();
+    updateAddToEhrButtonState();
+    return;
+  }
+
+  const currentNormalized = fullDrugNames.map(name => normalizeDrugKey(name)).join('\n');
   const { byName: persistedByName, lastText } = loadMedStatus();
 
   // If unchanged since last validation, just restore and render; no API call.
@@ -833,15 +872,6 @@ async function checkMedicationsFromTextarea(textarea) {
     return;
   }
 
-  const rawLines = (textarea.value || '').split('\n').map(l => l.trim()).filter(Boolean);
-  if (rawLines.length === 0) {
-    medAvailability.clear();
-    saveMedStatus({}, currentNormalized);
-    renderMedicationInline();
-    updateAddToEhrButtonState();
-    return;
-  }
-
   medicationValidationPending = true;
   showPendingIndicators();
 
@@ -849,7 +879,7 @@ async function checkMedicationsFromTextarea(textarea) {
     const response = await fetch(`${SERVER_URL}/api/medications/availability`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names: rawLines })
+      body: JSON.stringify({ names: fullDrugNames })
     });
 
     if (!response.ok) {
@@ -1041,20 +1071,25 @@ function renderMedicationInline() {
 
     if (line) {
       const key = normalizeDrugKey(line);
+      const isFull = isFullDrugName(line);
 
-      if (medAvailability.has(key)) {
-        const ok = !!medAvailability.get(key);
-        const badge = document.createElement('span');
-        badge.className = `med-emoji ${ok ? 'med-available' : 'med-unavailable'}`;
-        badge.textContent = ok ? '✅' : '❌';
-        row.appendChild(badge);
-      } else if (medicationValidationPending) {
-        // If we're currently validating, show pending
-        const badge = document.createElement('span');
-        badge.className = 'med-emoji med-pending';
-        badge.textContent = '⏳';
-        row.appendChild(badge);
+      // Only show status for full drug names
+      if (isFull) {
+        if (medAvailability.has(key)) {
+          const ok = !!medAvailability.get(key);
+          const badge = document.createElement('span');
+          badge.className = `med-emoji ${ok ? 'med-available' : 'med-unavailable'}`;
+          badge.textContent = ok ? '✅' : '❌';
+          row.appendChild(badge);
+        } else if (medicationValidationPending) {
+          // If we're currently validating, show pending
+          const badge = document.createElement('span');
+          badge.className = 'med-emoji med-pending';
+          badge.textContent = '⏳';
+          row.appendChild(badge);
+        }
       }
+      // Partial names show no badge
     }
 
     frag.appendChild(row);

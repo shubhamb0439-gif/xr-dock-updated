@@ -116,12 +116,15 @@ button { transition: background-color 0.3s; font-weight: 500; }
 .scribe-section-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px }
 .scribe-section h3{ font-size:14px; font-weight:600; margin:0; color:#fff }
 .scribe-section .scribe-section-meta{ font-size:13px; color:#a7f3d0; font-weight:600; margin-left:12px }
-.scribe-textarea{ width:100%; background:#0f172a; color:#fff; padding:10px; border-radius:10px; border:1px solid rgba(255,255,255,.06); resize:none; min-height:60px; outline:none }
+.scribe-textarea{ width:100%; background:#0f172a; color:#fff; padding:10px; border-radius:10px; border:1px solid rgba(255,255,255,.06); resize:none; min-height:60px; outline:none; line-height:1.5; overflow-y:hidden; }
+
+/* Medication textarea: 3 visible lines by default */
+.scribe-textarea[data-section="Medication"]{ min-height:calc(1.5em * 3 + 20px); max-height:none; overflow-y:auto; }
 
 /* Sticky actions in the SOAP area */
 .scribe-soap-actions{
   position:sticky; bottom:0; z-index:2; padding:10px; display:flex; gap:8px; justify-content:flex-end;
-  background:linear-gradient(180deg,rgba(11,15,25,0),rgba(11,15,25,.85) 30%,rgba(11,15,25,1) 60%);
+  background:rgba(11,15,25,1);
   margin:-12px; margin-top:6px; padding-top:16px;
 }
 
